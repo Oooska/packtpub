@@ -1,4 +1,82 @@
-﻿function Register-PacktPubFreeBookJob {
+﻿function New-PacktPubWebSession {
+    param(
+        [parameter(Mandatory=$true)]
+        [string]$email,
+        
+        [parameter(Mandatory=$true)]
+        [string]$password
+    )
+
+    $page = Invoke-WebRequest https://www.packtpub.com/packt/offers/free-learning -SessionVariable sv
+    $form = getLoginForm -page $page -email $email -password $password
+
+    $loggedInPage = Invoke-WebRequest https://www.packtpub.com/ -Method Post -Body $form -WebSession $sv
+
+    return $sv
+}
+
+
+#Get-PacktPubFreeBook logs into the specified PacktPub account, claims the free daily book, and, if $download=$true, downloads
+#the book in the specified format to $savedir.
+function Get-PacktPubClaimFreeBook {
+    param (
+        [parameter()]
+        $ws=(New-PacktPubWebSession)
+    )
+
+    #Get Page, parse login form and claim URL
+    $freeBookPage = Invoke-WebRequest https://www.packtpub.com/packt/offers/free-learning -WebSession $ws
+    $title = getFreeBookTitle $freeBookPage
+    $claimURL = getFreeBookClaimURL $freeBookPage
+    $bookID = getFreeBookID $claimURL
+      
+    #Claim free book - throws 404 error if not logged in successfully
+    $claimBookPage = Invoke-WebRequest $claimURL -WebSession $ws
+    
+
+    if($claimBookPage){
+        return @{
+            ws = $ws
+            id = $bookID
+            title = $title
+        }
+    }
+    
+    throw "Error claiming book `"$title`" ($bookID)"
+}
+
+function Get-PacktPubDownloadBooks {
+    param (
+        [parameter(Mandatory=$true,
+                   Position=0,
+                   ValueFromPipeline=$true)]
+        [hashtable]$books,
+
+        [parameter()] 
+        [ValidateSet("pdf", "mobi", "epub")]
+        [string]$format="pdf",
+
+        [parameter()]
+        [string]$saveDir #=$env:USERPROFILE+"\Documents\ebooks"
+    )
+
+    begin {
+        if($saveDir){
+            Set-Location $saveDir
+        }
+    }
+
+    process {
+        foreach($book in $books){
+            $bookID = $book.id
+            $bookTitle = $book.title
+            Invoke-WebRequest "https://www.packtpub.com/ebook_download/$bookID/$format" -WebSession $book.ws -OutFile "$bookTitle ($bookID).$format"
+        }
+    }
+}
+
+
+function Register-PacktPubFreeBookJob {
     #Registers a job to call Get-PacktPubFreeBook at the specified time
     #By default, the task will wake your computer if it is hibernating or sleeping in order to accomplish this task
 
@@ -40,62 +118,17 @@
 
     #Schedule the job
     Register-ScheduledJob -Name PacktPubFreeBook -Trigger $dailyTrigger -ScheduledJobOption $options -RunNow -ScriptBlock {
-        Import-Module $env:USERPROFILE+"\Documents\WindowsPowerShell\Modules\packtpub.psm1"
         $s = Read-PacktPubSettings
-        Get-PacktPubFreeBook -email $s.email -password $s.password -download $s.download  -format $s.format -saveDir $s.saveDir
-    }
-}
+        $book = Get-PacktPubClaimFreeBook (New-PacktPubWebSession $s.email $s.password)
 
-#Get-PacktPubFreeBook logs into the specified PacktPub account, claims the free daily book, and, if $download=$true, downloads
-#the book in the specified format to $savedir.
-function Get-PacktPubFreeBook {
-    param (
-        [parameter(Mandatory=$true)]
-        [string]$email,
-        
-        [parameter(Mandatory=$true)]
-        [string]$password,
-
-        [parameter()]
-        [bool]$download=$true,
-
-        [parameter()] 
-        [ValidateSet("pdf", "mobi", "epub")]
-        [string]$format="pdf",
-
-        [parameter()]
-        [string]$saveDir=$env:USERPROFILE+"\Documents\ebooks"
-    )
-
-
-    #Get Page, parse login form and claim URL
-    $page = Invoke-WebRequest https://www.packtpub.com/packt/offers/free-learning -SessionVariable sv
-    $form = getLoginForm -page $page -email $email -password $password
-    $claimURL = getFreeBookClaimURL $page
-
-    #Login
-    $loggedInPage = Invoke-WebRequest https://www.packtpub.com/ -Method Post -Body $form -WebSession $sv
-
-    #Claim free book - throws 404 error if not logged in successfully
-    $claimBookPage = Invoke-WebRequest $claimURL -WebSession $sv
-
-    if($claimBookPage){
-        "Successfully claimed " + (getFreeBookTitle $page)
-    } else {
-        throw "Error claiming book" + (getFreeBookTitle $page)
-        return 1
-    }
-
-    #Download the book in the specified format
-    if($download){
-        if($saveDir){
-            Set-Location $saveDir
+        #-download $s.download  -format $s.format -saveDir $s.saveDir
+        if($s.download){
+            $book | Get-PacktPubDownloadBooks -format $s.format -saveDir $s.saveDir
         }
-        $bookID = getFreeBookID $claimURL
-        Invoke-WebRequest ("https://www.packtpub.com/ebook_download/" + $bookID + "/" + $format) -WebSession $sv -OutFile ((getFreeBookTitle $page)+"."+ $format)
-    }  
-
+    }
 }
+
+
 
 #getLoginForm returns a hash table representing the form that must be
 #POSTed to packtpub.
@@ -145,10 +178,7 @@ function getFreeBookTitle($dotdpage){
 #writeSettings saves the settings required by a scheduled job to %appdata%/packtpub.dat
 #TODO: Encrypt information (particularly password)
 function writeSettings($email, $password, $download, $format, $saveDir){
-    "Download: "
-    $download
-    "{0}`t{1}`t{2}`t{3}`t{4}" -f $email,$password,$download,$format,$saveDir |`
-      Set-Content -Path $env:APPDATA\packtpub.dat
+    "$email`t$password`t$download`t$format`t$saveDir" | Set-Content -Path $env:APPDATA\packtpub.dat
 }
 
 #Read-PacktPubSettings reads the settings from %appdata%/packtpub.dat
@@ -165,42 +195,8 @@ function Read-PacktPubSettings(){
     }
 }
 
+Export-ModuleMember -Function New-PacktPubWebSession
+Export-ModuleMember -Function Get-PacktPubClaimFreeBook
+Export-ModuleMember -Function Get-PacktPubDownloadBooks
 Export-ModuleMember -Function Register-PacktPubFreeBookJob
-Export-ModuleMember -Function Get-PacktPubFreeBook
 Export-ModuleMember -Function Read-PacktPubSettings
-
-<#
-function Get-AllPacktPubBooks {
-    [CmdletBinding()]
-    param(
-        [parameter(Mandatory=$true)]
-        [string]$email,
-
-        [parameter(Mandatory=$true)]
-        [string]$password,
-
-        [parameter(Mandatory=$true)]
-        [string]$folder,
-
-        [parameter(Mandatory=$true)]
-        [string]$format #pdf, epub, mobi
-    )
-
-
-}
-
-
-$email = "junk@oooska.com"
-$password = "..."
-
-$page = Invoke-WebRequest https://www.packtpub.com/packt/offers/free-learning -SessionVariable sv
-$form = get-loginForm -page $page -email $email -password $password
-$loggedInPage = Invoke-WebRequest https://www.packtpub.com/ -Method Post -Body $form -WebSession $sv
-$format = "pdf"
-$listpage = Invoke-WebRequest https://www.packtpub.com/account/my-ebooks -WebSession $sv 
-
-$list = $listpage.ParsedHtml.getElementsByTagName("div") | where { $_.className -like "product-line*" }
-$list[0]
-
-Invoke-WebRequest https://www.packtpub.com/ebook_download/8064/pdf -WebSession $sv -OutFile "book.pdf"
-#>
